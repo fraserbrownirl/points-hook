@@ -15,6 +15,9 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 
 contract LiquidityPointsHook is BaseHook, ERC1155 {
+    uint256 public constant POINTS_DIVISOR = 10;
+    event PointsMinted(address indexed user, uint256 poolId, uint256 points);
+
     constructor(IPoolManager _manager) BaseHook(_manager) {}
 
     function getHookPermissions()
@@ -29,10 +32,10 @@ contract LiquidityPointsHook is BaseHook, ERC1155 {
                 afterInitialize: false,
                 beforeAddLiquidity: false,
                 beforeRemoveLiquidity: false,
-                afterAddLiquidity: true,  // Enable afterAddLiquidity
+                afterAddLiquidity: true,
                 afterRemoveLiquidity: false,
                 beforeSwap: false,
-                afterSwap: false,  // Disable afterSwap
+                afterSwap: false,
                 beforeDonate: false,
                 afterDonate: false,
                 beforeSwapReturnDelta: false,
@@ -46,50 +49,64 @@ contract LiquidityPointsHook is BaseHook, ERC1155 {
         return "https://api.example.com/token/{id}";
     }
 
-    function _afterAddLiquidity(
-        address,
-        PoolKey calldata key,
-        ModifyLiquidityParams calldata params,
-        BalanceDelta delta,
-        bytes calldata hookData
-    ) internal override returns (bytes4, BalanceDelta) {
-        // Only mint points for ETH-TOKEN pools with this hook attached
-        if (!key.currency0.isAddressZero()) return (this.afterAddLiquidity.selector, delta);
-
-        // Only mint points when adding liquidity (positive liquidityDelta)
-        if (params.liquidityDelta <= 0) return (this.afterAddLiquidity.selector, delta);
-
-        // Calculate points based on the amount of ETH added to the pool
-        // BalanceDelta for adding liquidity will have negative values (money leaving user's wallet)
-        // So we need to take the absolute value
-        uint256 ethAddedAmount = uint256(int256(-delta.amount0()));
-        
-        // Give points equal to 10% of the ETH amount added as liquidity
-        uint256 pointsForLiquidity = ethAddedAmount / 10;
-
-        // Mint the points
-        _assignPoints(key.toId(), hookData, pointsForLiquidity);
-
-        return (this.afterAddLiquidity.selector, delta);
-    }
-
+    /// @notice Mints points to a user based on ETH liquidity added to a pool
+    /// @param poolId The ID of the pool
+    /// @param hookData Encoded address of the user to receive points
+    /// @param points The number of points to mint
     function _assignPoints(
         PoolId poolId,
         bytes calldata hookData,
         uint256 points
     ) internal {
-        // If no hookData is passed in, no points will be assigned to anyone
         if (hookData.length == 0) return;
 
-        // Extract user address from hookData
-        address user = abi.decode(hookData, (address));
+        address user;
+        try this.decodeHookData(hookData) returns (address decoded) {
+            user = decoded;
+        } catch {
+            return;
+        }
 
-        // If there is hookData but not in the format we're expecting and user address is zero
-        // nobody gets any points
-        if (user == address(0)) return;
+        if (user != address(0)) {
+            uint256 poolIdUint = uint256(PoolId.unwrap(poolId));
+            _mint(user, poolIdUint, points, "");
+            emit PointsMinted(user, poolIdUint, points);
+        }
+    }
 
-        // Mint points to the user
-        uint256 poolIdUint = uint256(PoolId.unwrap(poolId));
-        _mint(user, poolIdUint, points, "");
+    /// @notice Helper function to decode hookData safely
+    /// @param data The encoded hook data
+    /// @return The decoded user address
+    function decodeHookData(bytes calldata data) external pure returns (address) {
+        return abi.decode(data, (address));
+    }
+
+    /// @notice Called after liquidity is added to a pool
+    /// @param sender The address that initiated the liquidity addition
+    /// @param key The pool key
+    /// @param params The liquidity modification parameters
+    /// @param delta The balance delta for the liquidity change
+    /// @param hookData Additional data passed to the hook
+    /// @return selector The function selector
+    /// @return delta The balance delta
+    function _afterAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) internal override returns (bytes4, BalanceDelta) {
+        if (!key.currency0.isAddressZero() || params.liquidityDelta <= 0) {
+            return (this.afterAddLiquidity.selector, delta);
+        }
+
+        uint256 ethAddedAmount = uint256(int256(-delta.amount0()));
+        uint256 pointsForLiquidity = ethAddedAmount / POINTS_DIVISOR;
+
+        if (pointsForLiquidity > 0) {
+            _assignPoints(key.toId(), hookData, pointsForLiquidity);
+        }
+
+        return (this.afterAddLiquidity.selector, delta);
     }
 }
