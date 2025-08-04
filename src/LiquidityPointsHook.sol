@@ -16,6 +16,7 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 
 contract LiquidityPointsHook is BaseHook, ERC1155 {
     uint256 public constant POINTS_DIVISOR = 10;
+
     event PointsMinted(address indexed user, uint256 poolId, uint256 points);
 
     constructor(IPoolManager _manager) BaseHook(_manager) {}
@@ -49,36 +50,20 @@ contract LiquidityPointsHook is BaseHook, ERC1155 {
         return "https://api.example.com/token/{id}";
     }
 
-    /// @notice Mints points to a user based on ETH liquidity added to a pool
+    /// @notice Mints points to the liquidity provider based on ETH added to a pool
     /// @param poolId The ID of the pool
-    /// @param hookData Encoded address of the user to receive points
+    /// @param sender The address that added the liquidity (receives the points)
     /// @param points The number of points to mint
-    function _assignPoints(
+    function _assignPointsToSender(
         PoolId poolId,
-        bytes calldata hookData,
+        address sender,
         uint256 points
     ) internal {
-        if (hookData.length == 0) return;
+        if (sender == address(0)) return;
 
-        address user;
-        try this.decodeHookData(hookData) returns (address decoded) {
-            user = decoded;
-        } catch {
-            return;
-        }
-
-        if (user != address(0)) {
-            uint256 poolIdUint = uint256(PoolId.unwrap(poolId));
-            _mint(user, poolIdUint, points, "");
-            emit PointsMinted(user, poolIdUint, points);
-        }
-    }
-
-    /// @notice Helper function to decode hookData safely
-    /// @param data The encoded hook data
-    /// @return The decoded user address
-    function decodeHookData(bytes calldata data) external pure returns (address) {
-        return abi.decode(data, (address));
+        uint256 poolIdUint = uint256(PoolId.unwrap(poolId));
+        _mint(sender, poolIdUint, points, "");
+        emit PointsMinted(sender, poolIdUint, points);
     }
 
     /// @notice Called after liquidity is added to a pool
@@ -86,7 +71,7 @@ contract LiquidityPointsHook is BaseHook, ERC1155 {
     /// @param key The pool key
     /// @param params The liquidity modification parameters
     /// @param delta The balance delta for the liquidity change
-    /// @param hookData Additional data passed to the hook
+    /// @param hookData Additional data passed to the hook (unused for security)
     /// @return selector The function selector
     /// @return delta The balance delta
     function _afterAddLiquidity(
@@ -96,15 +81,30 @@ contract LiquidityPointsHook is BaseHook, ERC1155 {
         BalanceDelta delta,
         bytes calldata hookData
     ) internal override returns (bytes4, BalanceDelta) {
-        if (!key.currency0.isAddressZero() || params.liquidityDelta <= 0) {
+        // Check if this pool contains the native token (ETH) in either position
+        bool hasNativeToken = key.currency0.isAddressZero() || key.currency1.isAddressZero();
+        
+        // Only proceed if pool has native token and liquidity was added
+        if (!hasNativeToken || params.liquidityDelta <= 0) {
             return (this.afterAddLiquidity.selector, delta);
         }
 
-        uint256 ethAddedAmount = uint256(int256(-delta.amount0()));
-        uint256 pointsForLiquidity = ethAddedAmount / POINTS_DIVISOR;
+        // Calculate ETH amount added based on which position ETH is in
+        uint256 ethAddedAmount;
+        if (key.currency0.isAddressZero()) {
+            // ETH is currency0
+            ethAddedAmount = uint256(int256(-delta.amount0()));
+        } else {
+            // ETH is currency1
+            ethAddedAmount = uint256(int256(-delta.amount1()));
+        }
 
+        // Calculate points to award (10% of ETH added)
+        uint256 pointsForLiquidity = ethAddedAmount / POINTS_DIVISOR;
+        
         if (pointsForLiquidity > 0) {
-            _assignPoints(key.toId(), hookData, pointsForLiquidity);
+            // Always mint to the actual liquidity provider for security
+            _assignPointsToSender(key.toId(), sender, pointsForLiquidity);
         }
 
         return (this.afterAddLiquidity.selector, delta);
